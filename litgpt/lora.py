@@ -86,6 +86,68 @@ class LoRALayer(nn.Module):
         self.merged = False
 
 
+class Skip2LoRA(LoRALayer):
+    """Skip-connected LoRA for efficient fine-tuning.
+    
+    Instead of adding LoRA outputs at each layer, Skip2-LoRA accumulates
+    LoRA outputs from multiple layers and adds them only at the final layer.
+    This reduces computational and memory costs during backpropagation.
+    
+    Reference: Skip2-LoRA: Efficient LoRA Tuning with Early Exiting
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        r: int = 0,
+        lora_alpha: int = 1,
+        lora_dropout: float = 0.0,
+    ):
+        """Initialize Skip2LoRA layer.
+
+        Args:
+            in_features: number of input features
+            out_features: number of output features (typically the final layer's output dimension)
+            r: rank of the weight update matrices
+            lora_alpha: alpha is needed for scaling updates as alpha/r
+            lora_dropout: dropout that is applied on the input in the LoRA branch
+        """
+        super().__init__(r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+        self.in_features = in_features
+        self.out_features = out_features
+
+        # Actual trainable parameters
+        if r > 0:
+            self.lora_A = nn.Parameter(torch.empty((r, in_features)))
+            self.lora_B = nn.Parameter(torch.empty((out_features, r)))
+            self.scaling = self.lora_alpha / self.r
+            self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Reset all the weights."""
+        if hasattr(self, "lora_A"):
+            # initialize A the same way as the default for nn.Linear and B to zero
+            nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute skip-connected LoRA output (without adding to original).
+        
+        Returns:
+            LoRA output to be accumulated and added at the final layer.
+            If r == 0, returns a zero tensor.
+        """
+        if self.r == 0:
+            # Return zero tensor with the correct shape if LoRA is disabled
+            return torch.zeros(x.shape[:-1] + (self.out_features,), 
+                             dtype=x.dtype, device=x.device)
+        
+        # Compute LoRA: dropout(x) @ A.T @ B.T
+        lora = (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
+        return lora
+
+
 class LoRALinear(LoRALayer):
     # LoRA implemented in a dense layer
     def __init__(
@@ -470,6 +532,11 @@ class Config(BaseConfig):
     lora_mlp: bool = False
     lora_head: bool = False
 
+    # Skip2-LoRA parameters
+    skip2lora_enabled: bool = False
+    skip2lora_block_indices: Tuple[int, ...] = ()  # e.g., (0, 1, 2, 3) for first 4 blocks
+    skip2lora_output_layer: str = "lm_head"  # where to add accumulated Skip2-LoRA outputs
+
     @property
     def mlp_class(self) -> Type:
         return getattr(litgpt.lora, self.mlp_class_name)
@@ -499,6 +566,92 @@ class GPT(BaseModel):
         self.mask_cache: Optional[torch.Tensor] = None
         self.max_seq_length = self.config.block_size
 
+    def forward(
+        self,
+        idx: torch.Tensor,
+        input_pos: Optional[torch.Tensor] = None,
+        input_pos_maxp1: Optional[int] = None,
+        lm_head_chunk_size: int = 0,
+    ) -> Union[torch.Tensor, list]:
+        """Forward pass with Skip2-LoRA support.
+        
+        If Skip2-LoRA is enabled, accumulated LoRA outputs from specified layers
+        are added to the final layer output.
+        """
+        from functools import partial
+        from litgpt.model import do_softcapping, batched_index_select
+        
+        T = idx.size(1)
+        if self.max_seq_length < T:
+            raise ValueError(f"Cannot forward sequence of length {T}, max seq length is only {self.max_seq_length}.")
+
+        if input_pos is not None:  # use the kv cache
+            if input_pos.dim() > 2:
+                raise ValueError(f"input_pos must have 1 or 2 dimensions, input_pos.shape = {input_pos.shape}")
+            if input_pos.shape[-1] != T:
+                raise ValueError(f"input_pos.shape[-1] = {input_pos.shape[-1]} != {T} = idx.shape[1], must be the same")
+            cos = batched_index_select(self.cos, 0, input_pos)
+            sin = batched_index_select(self.sin, 0, input_pos)
+            if input_pos.dim() == 1:
+                cos = cos.unsqueeze(0)
+                sin = sin.unsqueeze(0)
+            if self.mask_cache is None:
+                raise TypeError("You need to call `gpt.set_kv_cache()`")
+            mask = batched_index_select(self.mask_cache, 2, input_pos)
+            if mask.dim() > 4:
+                mask = mask.view(*(mask.shape[0:1] + mask.shape[2:]))
+            if input_pos_maxp1 is not None:
+                if input_pos_maxp1 > self.max_seq_length:
+                    raise ValueError(f"Positions in 'input_pos' must be in [0,{self.max_seq_length})")
+                mask = mask[..., :input_pos_maxp1]
+        else:
+            cos = self.cos[:T].unsqueeze(0)
+            sin = self.sin[:T].unsqueeze(0)
+            mask = None
+            input_pos_maxp1 = None
+
+        x = self.transformer.wte(idx)
+        if self.config.scale_embeddings:
+            x = x * torch.tensor(self.config.n_embd**0.5, dtype=x.dtype)
+
+        # Accumulate Skip2-LoRA outputs if enabled
+        skip2lora_accumulator = [] if self.config.skip2lora_enabled else None
+
+        for block_idx, block in enumerate(self.transformer.h):
+            if self.config.rope_indices is not None:
+                x = block(
+                    x,
+                    cos[..., self.config.rope_indices[block_idx]],
+                    sin[..., self.config.rope_indices[block_idx]],
+                    mask,
+                    input_pos,
+                    input_pos_maxp1,
+                )
+            else:
+                x = block(x, cos, sin, mask, input_pos, input_pos_maxp1)
+            
+            # Accumulate Skip2-LoRA output if this block has it
+            if skip2lora_accumulator is not None and block.skip2lora is not None:
+                skip2lora_output = block.skip2lora(x)
+                skip2lora_accumulator.append(skip2lora_output)
+
+        x = self.transformer.ln_f(x)
+        
+        # Add accumulated Skip2-LoRA outputs to x before lm_head
+        if skip2lora_accumulator:
+            accumulated_skip2lora = torch.stack(skip2lora_accumulator).sum(dim=0)
+            x = x + accumulated_skip2lora
+
+        clamp_head = (
+            partial(do_softcapping, thresh=self.config.final_logit_softcapping)
+            if self.config.final_logit_softcapping is not None
+            else nn.Identity()
+        )
+        if lm_head_chunk_size > 0:
+            return [clamp_head(self.lm_head(x_i)) for x_i in x.split(lm_head_chunk_size, dim=1)]
+        else:
+            return clamp_head(self.lm_head(x))
+
     @classmethod
     def from_name(cls, name: str, **kwargs: Any) -> Self:
         return cls(Config.from_name(name, **kwargs))
@@ -521,6 +674,18 @@ class Block(BaseBlock):
         super().__init__(config, block_idx)
         self.attn = CausalSelfAttention(config, block_idx)
         self.mlp = config.mlp_class(config)
+        
+        # Skip2-LoRA layer (inserted at specified block indices)
+        if config.skip2lora_enabled and block_idx in config.skip2lora_block_indices:
+            self.skip2lora = Skip2LoRA(
+                in_features=config.n_embd,
+                out_features=config.n_embd,
+                r=config.lora_r,
+                lora_alpha=config.lora_alpha,
+                lora_dropout=config.lora_dropout,
+            )
+        else:
+            self.skip2lora = None
 
 
 class CausalSelfAttention(BaseCausalSelfAttention):
