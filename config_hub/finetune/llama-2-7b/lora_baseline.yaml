@@ -1,0 +1,42 @@
+# Traditional LoRA Configuration
+# Query + Value層にのみLoRAを適用
+
+checkpoint_dir: checkpoints/meta-llama/Llama-2-7b-hf
+out_dir: out/finetune/lora-baseline
+
+precision: bf16-true
+quantize:
+
+devices: 1
+num_nodes: 1
+
+# LoRA設定（従来方式）
+lora_r: 32
+lora_alpha: 16
+lora_dropout: 0.05
+
+lora_query: true
+lora_key: false
+lora_value: true
+lora_projection: false
+lora_mlp: false
+lora_head: false
+
+# Skip2-LoRA は無効化
+skip2lora_enabled: false
+skip2lora_block_indices: []
+skip2lora_output_layer: lm_head
+
+# Training settings
+learning_rate: 1e-4
+batch_size: 2
+micro_batch_size: 2
+max_steps: 100  # 短いトレーニング用
+eval_interval: 10
+log_interval: 5
+save_interval: 100
+
+data:
+  class_path: litgpt.data.Alpaca2k
+  init_args:
+    mask_prompt: false
