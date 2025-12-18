@@ -1,0 +1,64 @@
+# Test configuration for standard LoRA with TinyLlama (for comparison with Skip2-LoRA)
+checkpoint_dir: checkpoints/TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
+# Directory in which to save checkpoints and logs.
+out_dir: out/finetune/lora-tinyllama-test
+
+# The precision to use for finetuning.
+precision: 32-true
+
+devices: 1
+num_nodes: 1
+
+# The LoRA rank.
+lora_r: 8
+
+# The LoRA alpha.
+lora_alpha: 16
+
+# The LoRA dropout value.
+lora_dropout: 0.05
+
+# Apply LoRA to query, key, value
+lora_query: true
+lora_key: true
+lora_value: true
+lora_projection: true
+lora_mlp: true
+lora_head: true
+
+# Data configuration
+data:
+  class_path: litgpt.data.Alpaca2k
+  init_args:
+    mask_prompt: false
+
+# Training configuration (same as Skip2-LoRA for fair comparison)
+train:
+  save_interval: 100
+  log_interval: 1
+  global_batch_size: 4
+  micro_batch_size: 1
+  lr_warmup_steps: 10
+  epochs: 1
+  max_steps: 50
+
+# Evaluation configuration
+eval:
+  interval: 100
+  max_new_tokens: 100
+  max_iters: 100
+  initial_validation: false
+  final_validation: true
+
+logger_name: csv
+seed: 1337
+
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 0.0002
+    weight_decay: 0.0
+    betas:
+      - 0.9
+      - 0.95
