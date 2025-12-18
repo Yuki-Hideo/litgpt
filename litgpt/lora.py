@@ -147,6 +147,12 @@ class Skip2LoRA(LoRALayer):
         lora = (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
         return lora
 
+    def merge(self) -> None:
+        """Merge Skip2-LoRA weights (no-op for Skip2-LoRA as it doesn't modify base weights)."""
+        # Skip2-LoRA outputs are accumulated and added at the output layer,
+        # so there's no need to merge weights into the base model
+        pass
+
 
 class LoRALinear(LoRALayer):
     # LoRA implemented in a dense layer
@@ -506,7 +512,7 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none") -> None:
 
 
 def lora_filter(key: str, value: Any) -> bool:
-    return "lora_" in key
+    return "lora_" in key or "skip2lora" in key
 
 
 @dataclass
@@ -824,4 +830,6 @@ def merge_lora_weights(model: GPT) -> None:
     """Merge LoRA weights into the full-rank weights to speed up inference."""
     for module in model.modules():
         if isinstance(module, LoRALinear):
+            module.merge()
+        elif isinstance(module, Skip2LoRA):
             module.merge()
