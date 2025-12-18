@@ -18,6 +18,7 @@ checkpoints
 out
 wandb
 events.out.tfevents*
+skip2lora_evaluation*
 
 # test artifacts from tests/test_readme.py
 **/custom_finetuning_dataset.json
