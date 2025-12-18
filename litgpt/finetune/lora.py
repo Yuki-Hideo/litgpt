@@ -61,6 +61,9 @@ def setup(
     lora_projection: bool = False,
     lora_mlp: bool = False,
     lora_head: bool = False,
+    skip2lora_enabled: bool = False,
+    skip2lora_block_indices: Tuple[int, ...] = (),
+    skip2lora_output_layer: str = "lm_head",
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
         save_interval=1000,
@@ -98,6 +101,9 @@ def setup(
         lora_projection: Whether to apply LoRA to the output projection in the attention block.
         lora_mlp: Whether to apply LoRA to the weights of the MLP in the attention block.
         lora_head: Whether to apply LoRA to output head in GPT.
+        skip2lora_enabled: Whether to enable Skip2-LoRA for efficient fine-tuning.
+        skip2lora_block_indices: Tuple of block indices where Skip2-LoRA layers should be inserted.
+        skip2lora_output_layer: Name of the output layer to add accumulated Skip2-LoRA outputs (default: "lm_head").
         data: Data-related arguments. If not provided, the default is ``litgpt.data.Alpaca``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
         eval: Evaluation-related arguments. See ``litgpt.args.EvalArgs`` for details.
@@ -125,6 +131,9 @@ def setup(
         lora_projection=lora_projection,
         lora_mlp=lora_mlp,
         lora_head=lora_head,
+        skip2lora_enabled=skip2lora_enabled,
+        skip2lora_block_indices=skip2lora_block_indices,
+        skip2lora_output_layer=skip2lora_output_layer,
     )
 
     precision = precision or get_default_supported_precision(training=True)
