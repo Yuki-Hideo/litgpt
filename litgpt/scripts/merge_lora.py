@@ -67,12 +67,15 @@ def merge_lora(
     lora_checkpoint = torch.load(str(lora_path), mmap=True)
     lora_checkpoint = lora_checkpoint.get("model", lora_checkpoint)
 
+    # Filter out Skip2-LoRA parameters as they cannot be merged into base model
+    # Skip2-LoRA outputs are accumulated separately, not added to base weights
+    lora_checkpoint_filtered = {k: v for k, v in lora_checkpoint.items() if "skip2lora" not in k}
+
     # Merge LoRA weights into the base model
-    pretrained_checkpoint.update(lora_checkpoint)
-    model.load_state_dict(pretrained_checkpoint, assign=True)
+    pretrained_checkpoint.update(lora_checkpoint_filtered)
+    model.load_state_dict(pretrained_checkpoint, assign=True, strict=False)
     # since LoRA finetuning only saves the LoRA weights, we treat the lora weights dtype as the expected dtype
-    lora_dtype = next(iter(lora_checkpoint.values())).dtype
-    model.to(dtype=lora_dtype, device="cpu")
+    # Note: assign=True already handles device and dtype, so no need for model.to()
     merge_lora_weights(model)
 
     # Remove LoRA parameters and the LoRA linear substring
@@ -95,7 +98,7 @@ def load_lora_metadata(checkpoint_dir: Path) -> Tuple[Dict[str, Any], Path, Opti
     with open(hparams_file, encoding="utf-8") as file:
         hparams = yaml.safe_load(file)
 
-    lora_params = {k: v for k, v in hparams.items() if k.startswith("lora_")}
+    lora_params = {k: v for k, v in hparams.items() if k.startswith("lora_") or k.startswith("skip2lora_")}
     pretrained_checkpoint_dir = Path(hparams["checkpoint_dir"])
     precision = hparams.get("precision")
     return lora_params, pretrained_checkpoint_dir, precision
