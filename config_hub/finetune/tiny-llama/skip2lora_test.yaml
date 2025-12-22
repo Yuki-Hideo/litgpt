@@ -20,16 +20,18 @@ lora_alpha: 16
 lora_dropout: 0.05
 
 # Skip2-LoRA configuration
+# Skip2-LoRA adds learnable skip connections from early layers to the output
 skip2lora_enabled: true
 skip2lora_block_indices: [0, 1, 2]
 skip2lora_output_layer: lm_head
 
-# Disable traditional LoRA since we're using Skip2-LoRA
-lora_query: false
+# Enable LoRA on attention and MLP layers
+# Skip2-LoRA works in addition to these standard LoRA adapters
+lora_query: true
 lora_key: false
-lora_value: false
+lora_value: true
 lora_projection: false
-lora_mlp: false
+lora_mlp: true
 lora_head: false
 
 # Data configuration
