@@ -1,0 +1,72 @@
+# Full training configuration for Skip2-LoRA with TinyLlama
+checkpoint_dir: checkpoints/TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
+# Directory in which to save checkpoints and logs.
+out_dir: out/finetune/lora-tinyllama-full
+
+# The precision to use for finetuning.
+precision: bf16-true
+
+devices: 1
+num_nodes: 1
+
+# The LoRA rank.
+lora_r: 8
+
+# The LoRA alpha.
+lora_alpha: 16
+
+# The LoRA dropout value.
+lora_dropout: 0.05
+
+# Skip2-LoRA configuration
+# Skip2-LoRA adds learnable skip connections from early layers to the output
+skip2lora_enabled: false
+# skip2lora_block_indices: [0, 1, 2, 3, 4, 5]  # More layers for better learning
+# skip2lora_output_layer: lm_head
+
+# Enable LoRA on attention and MLP layers
+# Skip2-LoRA works in addition to these standard LoRA adapters
+lora_query: true
+lora_key: false
+lora_value: true
+lora_projection: false
+lora_mlp: true
+lora_head: false
+
+# Data configuration
+data:
+  class_path: litgpt.data.Alpaca2k
+  init_args:
+    mask_prompt: false
+
+# Training configuration - Full training for better results
+train:
+  save_interval: 200
+  log_interval: 10
+  global_batch_size: 8
+  micro_batch_size: 2
+  lr_warmup_steps: 100
+  epochs: 3  # 3 epochs for better convergence
+  max_steps:  # Let it run for full epochs
+  max_seq_length: 512
+
+# Evaluation configuration
+eval:
+  interval: 100
+  max_new_tokens: 100
+  max_iters: 100
+  initial_validation: false
+  final_validation: true
+
+logger_name: csv
+seed: 1337
+
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 0.0002
+    weight_decay: 0.0
+    betas:
+      - 0.9
+      - 0.95
