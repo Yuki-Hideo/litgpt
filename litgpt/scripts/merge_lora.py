@@ -42,9 +42,9 @@ def merge_lora(
     check_valid_checkpoint_dir(checkpoint_dir, model_filename="lit_model.pth.lora")
     if pretrained_checkpoint_dir is not None:
         check_valid_checkpoint_dir(pretrained_checkpoint_dir)
-    if (checkpoint_dir / "lit_model.pth").is_file():
-        print("LoRA weights have already been merged in this checkpoint.")
-        return
+    # if (checkpoint_dir / "lit_model.pth").is_file():
+    #     print("LoRA weights have already been merged in this checkpoint.")
+    #     return
 
     lora_params, meta_pretrained_checkpoint_dir, lora_precision = load_lora_metadata(checkpoint_dir)
     precision = precision if precision is not None else lora_precision
@@ -67,12 +67,9 @@ def merge_lora(
     lora_checkpoint = torch.load(str(lora_path), mmap=True)
     lora_checkpoint = lora_checkpoint.get("model", lora_checkpoint)
 
-    # Filter out Skip2-LoRA parameters as they cannot be merged into base model
-    # Skip2-LoRA outputs are accumulated separately, not added to base weights
-    lora_checkpoint_filtered = {k: v for k, v in lora_checkpoint.items() if "skip2lora" not in k}
-
-    # Merge LoRA weights into the base model
-    pretrained_checkpoint.update(lora_checkpoint_filtered)
+    # Merge LoRA weights (including Skip2-LoRA) into the base model
+    # Skip2-LoRA adapters can be merged just like regular LoRA adapters
+    pretrained_checkpoint.update(lora_checkpoint)
     model.load_state_dict(pretrained_checkpoint, assign=True, strict=False)
     # since LoRA finetuning only saves the LoRA weights, we treat the lora weights dtype as the expected dtype
     # Note: assign=True already handles device and dtype, so no need for model.to()
