@@ -147,12 +147,6 @@ class Skip2LoRA(LoRALayer):
         lora = (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
         return lora
 
-    def merge(self) -> None:
-        """Merge Skip2-LoRA weights (no-op for Skip2-LoRA as it doesn't modify base weights)."""
-        # Skip2-LoRA outputs are accumulated and added at the output layer,
-        # so there's no need to merge weights into the base model
-        pass
-
 
 class LoRALinear(LoRALayer):
     # LoRA implemented in a dense layer
@@ -230,18 +224,13 @@ class LoRALinear(LoRALayer):
                 self.linear.weight.data += lora_data.to(device=self.linear.weight.data.device)
             self.merged = True
 
-    def forward(self, x: torch.Tensor, skip2lora_enabled: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # if weights are merged or rank is less or equal to zero (LoRA is disabled) - it's only a regular nn.Linear forward pass;
         # otherwise in addition do the forward pass with LoRA weights and add it's output to the output from pretrained weights
         pretrained = self.linear(x)
         if self.r == 0 or self.merged:
             return pretrained
         lora = (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
-        
-        # Skip2-LoRA: return both pretrained output and lora delta separately
-        if skip2lora_enabled:
-            return pretrained, lora
-        # Normal LoRA: add lora delta immediately
         return pretrained + lora
 
 
@@ -480,7 +469,6 @@ class LoRAQKVLinear(LoRALinear):
             self.lora_B.unsqueeze(-1),  # (256, 2) -> (256, 2, 1)
         ).transpose(-2, -1)  # (64, 4, 64) @ (256, 2, 1) -> (64, 256, 64) -> (64, 64, 256)
         lora = self.zero_pad(after_B) * self.scaling  # (64, 64, 256) after zero_pad (64, 64, 384)
-        # Note: LoRAQKVLinear doesn't support skip2lora mode yet (always adds immediately)
         return pretrained + lora
 
 
@@ -518,7 +506,7 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none") -> None:
 
 
 def lora_filter(key: str, value: Any) -> bool:
-    return "lora_" in key or "skip2lora" in key
+    return "lora_" in key
 
 
 @dataclass
@@ -626,7 +614,7 @@ class GPT(BaseModel):
         if self.config.scale_embeddings:
             x = x * torch.tensor(self.config.n_embd**0.5, dtype=x.dtype)
 
-        # Skip2-LoRA: accumulate LoRA deltas from all layers
+        # Accumulate Skip2-LoRA outputs if enabled
         skip2lora_accumulator = [] if self.config.skip2lora_enabled else None
 
         for block_idx, block in enumerate(self.transformer.h):
@@ -642,13 +630,14 @@ class GPT(BaseModel):
             else:
                 x = block(x, cos, sin, mask, input_pos, input_pos_maxp1)
             
-            # Skip2-LoRA: collect LoRA outputs from this block's LoRA layers
-            # This will be properly implemented when we refactor the Block forward to support it
-            # For now, this is a placeholder for the new architecture
+            # Accumulate Skip2-LoRA output if this block has it
+            if skip2lora_accumulator is not None and block.skip2lora is not None:
+                skip2lora_output = block.skip2lora(x)
+                skip2lora_accumulator.append(skip2lora_output)
 
         x = self.transformer.ln_f(x)
         
-        # Skip2-LoRA: add accumulated LoRA deltas at the final layer only
+        # Add accumulated Skip2-LoRA outputs to x before lm_head
         if skip2lora_accumulator:
             accumulated_skip2lora = torch.stack(skip2lora_accumulator).sum(dim=0)
             x = x + accumulated_skip2lora
@@ -685,7 +674,18 @@ class Block(BaseBlock):
         super().__init__(config, block_idx)
         self.attn = CausalSelfAttention(config, block_idx)
         self.mlp = config.mlp_class(config)
-        self.block_idx = block_idx
+        
+        # Skip2-LoRA layer (inserted at specified block indices)
+        if config.skip2lora_enabled and block_idx in config.skip2lora_block_indices:
+            self.skip2lora = Skip2LoRA(
+                in_features=config.n_embd,
+                out_features=config.n_embd,
+                r=config.lora_r,
+                lora_alpha=config.lora_alpha,
+                lora_dropout=config.lora_dropout,
+            )
+        else:
+            self.skip2lora = None
 
 
 class CausalSelfAttention(BaseCausalSelfAttention):
@@ -824,6 +824,4 @@ def merge_lora_weights(model: GPT) -> None:
     """Merge LoRA weights into the full-rank weights to speed up inference."""
     for module in model.modules():
         if isinstance(module, LoRALinear):
-            module.merge()
-        elif isinstance(module, Skip2LoRA):
             module.merge()
